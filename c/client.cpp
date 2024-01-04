@@ -1,8 +1,10 @@
 #include <stdlib.h>
 #include <stdio.h>
+#include <iostream>
 #include <errno.h>
 #include <unistd.h>
 #include <string.h>
+#include <string>
 #include <signal.h>
 #include <pthread.h>
 #include <sys/time.h>
@@ -13,7 +15,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <assert.h>
-#define PORT 20000
+#define PORT 69
 #define BACKLOG 5
 #define BUFLEN 512
 #define FILENAMELEN 110
@@ -33,7 +35,7 @@ void sendAck(int sockfd,char* arg,struct sockaddr_in* saddr);
 void writeRequest(int sockfd,char* arg,struct sockaddr_in* saddr);
 int checkAck(int sockfd,struct sockaddr_in* saddr,short number);
 void sendData(int sockfd,char* arg,struct sockaddr_in* saddr);
-size_t dataPacket(int sockfd,short number,char* buf,struct sockaddr_in* saddr,int depth=0);
+size_t dataPacket(int sockfd,short number,char* buf,struct sockaddr_in* saddr,int depth=BUFLEN);
 void ackPacket(int sockfd,short number,struct sockaddr_in* saddr);
 void help();
 void logo();
@@ -171,30 +173,31 @@ void readRequest(int sockfd,char* arg,struct sockaddr_in* saddr)
 {
 	request readFile;
 	readFile.operationCode=htons(RRQ);
-	strcpy(readFile.name, (const char*)arg);
-	if(strstr(readFile.name,"txt"))
-		strcpy(readFile.mode, "octet");
-	else
-		strcpy(readFile.mode, "netascii");
+	strcpy(readFile.name,(const char*)arg);
+	strcpy(readFile.mode,"octet");
 	int addrlen=sizeof(struct sockaddr_in);
 	int sendlen;
+	pthread_mutex_lock(&A_LOCK);
 	sendlen = sendto(sockfd, (char*)&readFile, sizeof(readFile), 0, (struct sockaddr*)saddr, (socklen_t)addrlen);
+	pthread_mutex_unlock(&A_LOCK);
 	if(sendlen == -1)
 		perror("sendto");
-	printf("readFile.operationCode:%hd\nreadFile.name:%s\nreadFile.mode:%s\n", ntohs(readFile.operationCode), readFile.name, readFile.mode);
+	std::cout << "readFile.operationCode:" << readFile.operationCode << "\nreadFile.name:" << readFile.name << "\nreadFile.mode:" << readFile.mode << std::endl;
 }
 
 int checkData(int sockfd,char* arg,struct sockaddr_in* saddr,short number)
 {
 	if( arg == NULL )
-		return 1;
+		return 1; 
 	data dataFile;
-	memset(&dataFile,-1,sizeof(dataFile));
+	memset(&dataFile,0,sizeof(dataFile));
 	data* p;
 	p=&dataFile;
 	int rcvlen=0;
     int addrlen=sizeof(struct sockaddr_in);
+	pthread_mutex_lock(&A_LOCK);
 	rcvlen=recvfrom(sockfd, p, sizeof(dataFile), 0, (struct sockaddr*)saddr, (socklen_t*)&addrlen);
+	pthread_mutex_unlock(&A_LOCK);
 	if(rcvlen == -1)
 		perror("rcvlen");
 	dataFile.operationCode=ntohs(dataFile.operationCode);
@@ -204,20 +207,22 @@ int checkData(int sockfd,char* arg,struct sockaddr_in* saddr,short number)
 	printf("number = %hd\n",number);
 	if(dataFile.operationCode == DATAPT && dataFile.number == number)
 	{
-
+		pthread_mutex_lock(&A_LOCK);
 		int newfd;
 		newfd=open( arg, O_RDWR | O_CREAT | O_APPEND );
 		if( newfd < 0)
 			fprintf(stderr,"Open file error: %s\n",strerror(errno) );
 		int count;
-  		count=write(newfd,dataFile.detail,(size_t)strlen(dataFile.detail) );
+		count=write(newfd,dataFile.detail,(size_t)rcvlen-(sizeof(short) + sizeof(number)) );
+		pthread_mutex_unlock(&A_LOCK);
 		if( count < 0)
 			fprintf(stderr,"Write file error: %s\n",strerror(errno) );
+		close(newfd);
 		return count;
 	}
 	else
 		printf("Check data incorrect\n");
-	return 0;
+	return -1;
 }
 
 void sendAck(int sockfd,char* arg,struct sockaddr_in* saddr)
@@ -226,6 +231,8 @@ void sendAck(int sockfd,char* arg,struct sockaddr_in* saddr)
 	int count=0;
 	while( count=checkData(sockfd,arg,saddr,number) )
 	{
+		if(count == -1)
+			continue;
 		if(errno == EINPROGRESS)
 			for(int i=0;i < MAXDEPTH;i++)
 			{
@@ -233,25 +240,25 @@ void sendAck(int sockfd,char* arg,struct sockaddr_in* saddr)
 				if(errno == SUCCESS)
 					break;
 			}
-		ackPacket(sockfd,number,saddr);
-		if(count < BUFLEN-1)
+		else
+			ackPacket(sockfd,number,saddr);
+		if(count < BUFLEN)
 			break;
 		number++;
 	}
-} 
+}
 
 void writeRequest(int sockfd,char* arg,struct sockaddr_in* saddr)
 {
 	request writeFile;
 	writeFile.operationCode=htons(WRQ);
-	strcpy(writeFile.name, (const char*)arg);
-	if(strstr(writeFile.name,"txt"))
-		strcpy(writeFile.mode, "octet");
-	else
-		strcpy(writeFile.mode, "netascii");
+	strcpy(writeFile.name,(const char*)arg);
+	strcpy(writeFile.mode,"octet");
 	int addrlen=sizeof(struct sockaddr_in);
 	int sendlen;
+	pthread_mutex_lock(&A_LOCK);
 	sendlen=sendto(sockfd, (char*)&writeFile, sizeof(writeFile), 0, (struct sockaddr*)saddr, (socklen_t)addrlen);
+	pthread_mutex_unlock(&A_LOCK);
 	if(sendlen == -1)
 		perror("sendto");
 }
@@ -264,7 +271,9 @@ int checkAck(int sockfd,struct sockaddr_in* saddr,short number)
 	p=&ackFile;
 	int rcvlen=0;
     int addrlen=sizeof(struct sockaddr_in);
+	pthread_mutex_lock(&A_LOCK);
 	rcvlen=recvfrom(sockfd, p, sizeof(ackFile), 0, (struct sockaddr*)saddr, (socklen_t*)&addrlen);
+	pthread_mutex_unlock(&A_LOCK);
 	if(rcvlen == -1)
 		perror("rcvlen");
 	ackFile.operationCode=ntohs(ackFile.operationCode);
@@ -281,20 +290,28 @@ int checkAck(int sockfd,struct sockaddr_in* saddr,short number)
 void sendData(int sockfd,char* arg,struct sockaddr_in* saddr)
 {
 	FILE *fileUpload;
-	fileUpload = fopen( (const char*)arg, "rb");
+	fileUpload = fopen( arg, "rb");
 	char buf[BUFLEN];
 	memset(buf, 0, sizeof(buf) );
 	size_t bytesRead;
 	size_t sendlen=0;
 	short number=1;
-	while( (bytesRead = fread(buf, sizeof(char), sizeof(buf) - 1, fileUpload)) >= 0 ) 
+	while( (bytesRead = fread(buf, sizeof(char), sizeof(buf), fileUpload)) >= 0 )//修改为">=0" 
 	{
-		if( bytesRead == 0 )
+		printf("bytesRead = %ld\n",bytesRead);
+		if( bytesRead == 0 ) 
 		{
 			sendlen=dataPacket(sockfd,number,NULL,saddr);
 			break;
 		}
-		sendlen=dataPacket(sockfd,number,buf,saddr);
+		else if( bytesRead == sizeof(buf) )
+			sendlen=dataPacket(sockfd,number,buf,saddr);
+		else
+		{
+			buf[bytesRead]='\0';
+			sendlen=dataPacket(sockfd,number,buf,saddr,bytesRead);//如有需要，可改为bytesRead-1
+		}
+		printf("sendlen = %ld\n",sendlen);
 		if( sendlen < 0 )
 			perror("DataPacket state");
 		for(int i=0;i < MAXDEPTH;i++)
@@ -308,7 +325,7 @@ void sendData(int sockfd,char* arg,struct sockaddr_in* saddr)
 				break; 
 		}
 		memset(buf, 0, sizeof(buf) );
-		if( bytesRead < BUFLEN-1 )
+		if( bytesRead < BUFLEN ) 
 			break;
 		number++;
  	}
@@ -325,7 +342,9 @@ size_t dataPacket(int sockfd,short number,char* buf,struct sockaddr_in* saddr,in
 	strcpy(dataFile.detail, (const char*)buf);
 	int addrlen=sizeof(struct sockaddr_in);
     size_t sendlen=0;
-	sendlen=sendto(sockfd, (char*)&dataFile, sizeof(dataFile), 0, (struct sockaddr*)saddr, (socklen_t)addrlen);
+	pthread_mutex_lock(&A_LOCK);
+	sendlen=sendto(sockfd, (char*)&dataFile, sizeof(dataFile)-BUFLEN+depth, 0, (struct sockaddr*)saddr, (socklen_t)addrlen); // 发送消息到服务器
+	pthread_mutex_unlock(&A_LOCK);
 	return sendlen;
 }
 
@@ -335,7 +354,9 @@ void ackPacket(int sockfd,short number,struct sockaddr_in* saddr)
 	ackFile.operationCode=htons(ACKPT);
 	ackFile.number=htons(number);
 	int addrlen=sizeof(struct sockaddr_in);
-	sendto(sockfd, (char*)&ackFile, sizeof(ackFile), 0, (struct sockaddr*)saddr, (socklen_t)addrlen);
+	pthread_mutex_lock(&A_LOCK);
+	sendto(sockfd, (char*)&ackFile, sizeof(ackFile), 0, (struct sockaddr*)saddr, (socklen_t)addrlen); // 发送消息到服务器
+	pthread_mutex_unlock(&A_LOCK);
 }
 
 void help()
